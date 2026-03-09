@@ -1,4 +1,4 @@
-"""LangGraph workflow: parse -> load -> analyze -> plan -> execute -> evaluate -> reflect -> report."""
+"""LangGraph workflow: parse -> load -> analyze -> ReAct modelling loop -> report."""
 
 import json
 import os
@@ -7,32 +7,37 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 
 from dotenv import load_dotenv
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from autonomous_polaris_agent.console import (
     error_display,
+    format_args_summary,
     llm_call,
-    metrics_display,
-    plan_display,
     step_result,
     step_start,
     thinking,
+    tool_calls_display,
+    tool_result_display,
 )
 from autonomous_polaris_agent.prompts import get_prompt
 from autonomous_polaris_agent.state import (
     AgentState,
     LogEntry,
     ParsedRequest,
-    PipelinePlan,
     ThoughtStep,
 )
 from autonomous_polaris_agent.tools import (
-    evaluate_predictions,
     load_benchmark as load_benchmark_tool,
+)
+from autonomous_polaris_agent.tools import (
     save_metrics_comparison_plot,
-    train_and_predict,
+)
+from autonomous_polaris_agent.tools.agent_tools import (
+    dispatch_tool,
+    get_modelling_tools,
 )
 
 load_dotenv()
@@ -40,7 +45,7 @@ load_dotenv()
 
 def _get_llm() -> ChatOpenAI:
     model = os.getenv("OPENAI_MODEL", "gpt-5.4")
-    temperature = float(os.getenv("OPENAI_TEMPERATURE", "0"))
+    temperature = float(os.getenv("OPENAI_TEMPERATURE", "0.4"))
     return ChatOpenAI(model=model, temperature=temperature)
 
 
@@ -48,7 +53,7 @@ def _llm_model_and_temp() -> tuple[str, float]:
     """Return (model_name, temperature) for console display."""
     return (
         os.getenv("OPENAI_MODEL", "gpt-5.4"),
-        float(os.getenv("OPENAI_TEMPERATURE", "0")),
+        float(os.getenv("OPENAI_TEMPERATURE", "0.4")),
     )
 
 
@@ -75,6 +80,24 @@ def _log(
     )
     logs.append(entry.model_dump())
     return logs
+
+
+def _reflection_from_train_result(content: str) -> str | None:
+    """Build a one-line reflection from train_and_predict JSON result. Returns None on parse error."""
+    try:
+        data = json.loads(content)
+        if data.get("error"):
+            return None
+        model_id = data.get("model_id", "")
+        description = data.get("description", "")
+        metrics = data.get("metrics") or {}
+        if not metrics:
+            return f"{model_id}: {description}"
+        metric_name = next(iter(metrics.keys()), "")
+        value = metrics.get(metric_name, "")
+        return f"{model_id}: {description} — {metric_name}={value}"
+    except (json.JSONDecodeError, TypeError):
+        return None
 
 
 def parse_input(state: AgentState) -> dict[str, Any]:
@@ -112,17 +135,33 @@ def parse_input(state: AgentState) -> dict[str, Any]:
             name="parse_input",
             summary=f"dataset_slug={parsed.dataset_slug!r}, num_models={parsed.num_models}, task_type={parsed.task_type}",
         )
-        return {"parsed": parsed.model_dump(), "last_error": None}
+        logs = _log(
+            state,
+            tool_or_step="parse_input",
+            args_summary="user_input",
+            result_summary=f"dataset_slug={parsed.dataset_slug!r}, num_models={parsed.num_models}, task_type={parsed.task_type}",
+        )
+        return {"parsed": parsed.model_dump(), "last_error": None, "logs": logs}
     except Exception as e:
         error_display(str(e))
         parsed = ParsedRequest(
             dataset_slug="polaris/hello-world-benchmark", num_models=1
         )
-        return {"parsed": parsed, "last_error": str(e)}
+        logs = _log(
+            state,
+            tool_or_step="parse_input",
+            args_summary="user_input",
+            result_summary=f"error={e!s}",
+        )
+        return {
+            "parsed": parsed.model_dump(),
+            "last_error": str(e),
+            "logs": logs,
+        }
 
 
 def load_benchmark_node(state: AgentState) -> dict[str, Any]:
-    """Load benchmark and store inspection."""
+    """Load benchmark and store metadata for the agent."""
     parsed = state.get("parsed")
     if isinstance(parsed, dict):
         slug = parsed.get("dataset_slug", "polaris/hello-world-benchmark")
@@ -130,23 +169,28 @@ def load_benchmark_node(state: AgentState) -> dict[str, Any]:
         slug = getattr(parsed, "dataset_slug", "polaris/hello-world-benchmark")
     step_start("load_benchmark", f"Loading benchmark {slug!r}")
     try:
-        benchmark, inspection = load_benchmark_tool(slug)
-        train_sz = inspection.get("train_size")
-        test_sz = inspection.get("test_size")
+        benchmark, metadata = load_benchmark_tool(slug)
+        n_train = metadata.get("n_train_datapoints") or metadata.get("train_size")
+        n_test = metadata.get("n_test_datapoints")
+        if isinstance(n_test, dict):
+            n_test_summary = sum(n_test.values())
+        else:
+            n_test_summary = n_test or metadata.get("test_size")
+        display_metadata = {k: v for k, v in metadata.items() if k != "split"}
         step_result(
             name="load_benchmark",
-            summary=f"train_size={train_sz}, test_size={test_sz}",
-            details=json.dumps(inspection, indent=2),
+            summary=f"n_train={n_train}, n_test={n_test_summary}",
+            details=json.dumps(display_metadata, indent=2),
         )
         logs = _log(
             state,
             tool_or_step="load_benchmark",
             args_summary=f"slug={slug!r}",
-            result_summary=f"train_size={train_sz}, test_size={test_sz}",
+            result_summary=f"n_train={n_train}, n_test={n_test_summary}",
         )
         return {
             "benchmark": benchmark,
-            "benchmark_inspection": inspection,
+            "benchmark_inspection": metadata,
             "logs": logs,
         }
     except Exception as e:
@@ -157,13 +201,13 @@ def load_benchmark_node(state: AgentState) -> dict[str, Any]:
 
 def analyze_node(state: AgentState) -> dict[str, Any]:
     """Produce task analysis and append to thought_process."""
-    step_start("analyze", "Task analysis from benchmark inspection")
-    inspection = state.get("benchmark_inspection") or {}
+    step_start("analyze", "Task analysis from benchmark metadata")
+    metadata = state.get("benchmark_inspection") or {}
     model, temp = _llm_model_and_temp()
     llm_call(model=model, temperature=temp, purpose="Analyze benchmark and task type")
     llm = _get_llm()
     prompt = get_prompt(
-        "analysis_task", benchmark_inspection=json.dumps(inspection, indent=2)
+        "analysis_task", benchmark_metadata=json.dumps(metadata, indent=2)
     )
     msg = llm.invoke([{"role": "user", "content": prompt}])
     content = msg.content if hasattr(msg, "content") else str(msg)
@@ -171,215 +215,130 @@ def analyze_node(state: AgentState) -> dict[str, Any]:
     step = ThoughtStep(stage="analysis", content=content)
     thought = list(state.get("thought_process") or [])
     thought.append(step.model_dump())
-    return {"task_analysis": content, "thought_process": thought}
+    logs = _log(
+        state,
+        tool_or_step="analyze",
+        args_summary="benchmark_metadata",
+        result_summary=content[:500] + "..." if len(content) > 500 else content,
+    )
+    return {"task_analysis": content, "thought_process": thought, "logs": logs}
 
 
-def planner_node(state: AgentState) -> dict[str, Any]:
-    """Produce next pipeline plan and append reasoning to thought_process."""
-    step_start("planner", "Planning next pipeline (fingerprint, model, hyperparams)")
+def seed_modelling_messages(state: AgentState) -> dict[str, Any]:
+    """Build initial messages for the ReAct modelling agent from task_analysis and state."""
+    task_analysis = state.get("task_analysis") or ""
+    metadata = state.get("benchmark_inspection") or {}
     parsed = state.get("parsed") or {}
     num_models = (
         parsed.get("num_models", 1)
         if isinstance(parsed, dict)
         else getattr(parsed, "num_models", 1)
     )
-    completed = state.get("completed_runs") or []
-    completed_count = len(completed)
-    user_input = state.get("user_input") or ""
-    task_analysis = state.get("task_analysis") or ""
-    inspection = state.get("benchmark_inspection") or {}
-    completed_summary = json.dumps(
-        [
-            r.get("model_id") if isinstance(r, dict) else getattr(r, "model_id", "")
-            for r in completed
-        ]
+    content = (
+        f"Task analysis:\n{task_analysis}\n\n"
+        f"Benchmark metadata:\n{json.dumps(metadata, indent=2)}\n\n"
+        f"Determine task_type (regression or classification) from the benchmark metadata (e.g. target_types) and pass it to train_and_predict and create_ensemble_predictions. If main_metric is roc_auc (or roc_auc_score), pass prediction_format='probabilities' to train_and_predict and create_ensemble_predictions. Otherwise use prediction_format='labels'.\n\n"
+        f"The user asked for exactly {num_models} pipeline(s). You must run exactly N pipelines (call train_and_predict N times) before calling finish_and_report. Each of the N pipelines must be meaningfully different (e.g. different fingerprint and/or model type); repeating the same pipeline does not count toward N. Do not call finish_and_report until you have N completed runs. Run pipelines one at a time: after each train_and_predict result, use the returned metrics and description to decide the next pipeline. You can iterate on hyperparameters (use_cv and tune_param_grid, or different hyperparameters) using each run's test metrics before moving to a new pipeline. Use each pipeline's results to inform the next (e.g. try a different model or fingerprint if the last one underperformed, or add scale_features/PCA/feature selection if that might help). Prefer pipelines that could improve the primary metric (e.g. try feature selection or scaling when relevant), not only safe baselines. When done, call finish_and_report."
     )
-
-    prompt = get_prompt(
-        "planning_pipeline",
-        num_models=num_models,
-        completed_count=completed_count,
-        user_input=user_input,
-        task_analysis=task_analysis,
-        benchmark_inspection=json.dumps(inspection, indent=2),
-        completed_runs_summary=completed_summary,
-    )
-    model, temp = _llm_model_and_temp()
-    llm_call(model=model, temperature=temp, purpose="Plan next ML pipeline")
-    llm = _get_llm()
-    msg = llm.invoke([{"role": "user", "content": prompt}])
-    content = msg.content if hasattr(msg, "content") else str(msg)
-    data = _extract_json(content)
-    reasoning = data.get("reasoning", "")
-    plan_data = data.get("plan", {})
-    plan = PipelinePlan(
-        fingerprint=plan_data.get("fingerprint", "morgan"),
-        model_type=plan_data.get("model_type", "ridge"),
-        hyperparameters=plan_data.get("hyperparameters", {}),
-        rationale=plan_data.get("rationale", ""),
-        use_cv=plan_data.get("use_cv", False),
-        tune_over=plan_data.get("tune_over", []),
-    )
-    thinking(stage="plan", content=reasoning + "\n\n" + plan.rationale)
-    plan_display(
-        fingerprint=plan.fingerprint,
-        model_type=plan.model_type,
-        hyperparameters=plan.hyperparameters,
-        rationale="",
-    )
-    step = ThoughtStep(stage="plan", content=reasoning + "\n\n" + plan.rationale)
-    thought = list(state.get("thought_process") or [])
-    thought.append(step.model_dump())
     return {
-        "current_plan": plan.model_dump(),
-        "thought_process": thought,
+        "messages": [
+            SystemMessage(content=get_prompt("modelling_agent_system")),
+            HumanMessage(content=content),
+        ]
     }
 
 
-def executor_node(state: AgentState) -> dict[str, Any]:
-    """Run train_and_predict and append RunResult, set last_predictions."""
-    benchmark = state.get("benchmark")
-    plan_data = state.get("current_plan")
-    if not benchmark or not plan_data:
-        step_start("executor", "Train and predict")
-        error_display("Missing benchmark or current_plan")
-        return {"last_error": "Missing benchmark or current_plan"}
-    plan = PipelinePlan(**plan_data) if isinstance(plan_data, dict) else plan_data
-    iteration = state.get("iteration", 0)
-    step_start("executor", f"Train and predict (run {iteration})")
-    try:
-        out_dir = state.get("output_dir") or "outputs"
-        artifacts_dir = os.path.join(out_dir, "artifacts")
-        preds, result = train_and_predict(
-            benchmark=benchmark,
-            plan=plan,
-            artifacts_dir=artifacts_dir,
-            run_id=iteration,
-        )
-        step_result(
-            name="executor",
-            summary=f"preds_len={len(preds)}, model_path={result.model_path}",
-        )
-        completed = list(state.get("completed_runs") or [])
-        completed.append(result.model_dump())
-        logs = _log(
-            state,
-            "train_and_predict",
-            args_summary=f"plan={plan.fingerprint}+{plan.model_type}",
-            result_summary=f"preds_len={len(preds)}, model_path={result.model_path}",
-        )
-        return {
-            "completed_runs": completed,
-            "last_predictions": preds,
-            "iteration": iteration + 1,
-            "last_error": None,
-            "logs": logs,
-        }
-    except Exception as e:
-        error_display(str(e))
-        from autonomous_polaris_agent.state import RunResult
-
-        logs = _log(
-            state,
-            "train_and_predict",
-            args_summary=f"plan={plan.fingerprint}+{plan.model_type}",
-            result_summary=f"error={e!s}",
-        )
-        completed = list(state.get("completed_runs") or [])
-        completed.append(
-            RunResult(
-                model_id=f"run_{iteration}_error",
-                description=f"Error: {e!s}",
-                metric_value=float("nan"),
-            ).model_dump()
-        )
-        return {
-            "completed_runs": completed,
-            "last_predictions": [],
-            "iteration": iteration + 1,
-            "last_error": str(e),
-            "logs": logs,
-        }
-
-
-def evaluator_node(state: AgentState) -> dict[str, Any]:
-    """Evaluate last_predictions and attach metrics to last RunResult."""
-    step_start("evaluator", "Evaluate predictions")
-    benchmark = state.get("benchmark")
-    preds = state.get("last_predictions") or []
-    completed = list(state.get("completed_runs") or [])
-    if not benchmark or not preds or not completed:
-        return {}
-    metrics = evaluate_predictions(benchmark, preds)
-    metrics_display(metrics)
-    last = completed[-1]
-    if isinstance(last, dict):
-        last["metrics"] = metrics
-        metric_name = next(iter(metrics.keys()), "")
-        last["metric_name"] = metric_name
-        last["metric_value"] = metrics.get(metric_name, 0.0)
-    completed[-1] = last
-    logs = _log(
-        state,
-        "evaluate_predictions",
-        args_summary=f"preds_len={len(preds)}",
-        result_summary=json.dumps(metrics),
-    )
-    return {"completed_runs": completed, "logs": logs}
-
-
-def reflect_node(state: AgentState) -> dict[str, Any]:
-    """Reflect on last run and append to thought_process."""
-    step_start("reflect", "Reflecting on last run")
-    completed = state.get("completed_runs") or []
-    parsed = state.get("parsed") or {}
-    num_models = (
-        parsed.get("num_models", 1)
-        if isinstance(parsed, dict)
-        else getattr(parsed, "num_models", 1)
-    )
-    remaining = max(0, num_models - len(completed))
-    last_result = json.dumps(completed[-1], indent=2) if completed else "{}"
-    completed_summary = json.dumps(
-        [(r.get("model_id"), r.get("metrics")) for r in completed], indent=2
-    )
-
-    prompt = get_prompt(
-        "reflection_after_run",
-        last_run_result=last_result,
-        completed_runs_summary=completed_summary,
-        remaining=remaining,
-    )
-    model, temp = _llm_model_and_temp()
-    llm_call(
-        model=model, temperature=temp, purpose="Reflect on last run and remaining work"
-    )
+def modelling_agent_node(state: AgentState) -> dict[str, Any]:
+    """Invoke LLM with tools; return new messages."""
+    step_start("modelling_agent", "Agent thinking / choosing tool")
+    messages = list(state.get("messages") or [])
     llm = _get_llm()
-    msg = llm.invoke([{"role": "user", "content": prompt}])
-    content = msg.content if hasattr(msg, "content") else str(msg)
-    try:
-        data = _extract_json(content)
-        reflection = data.get("reflection", content)
-    except Exception:
-        reflection = content
-    thinking(stage="reflection", content=reflection)
-    step = ThoughtStep(stage="reflection", content=reflection)
-    thought = list(state.get("thought_process") or [])
-    thought.append(step.model_dump())
-    return {"thought_process": thought}
+    tools = get_modelling_tools()
+    llm_with_tools = llm.bind_tools(tools)
+    model, temp = _llm_model_and_temp()
+    llm_call(model=model, temperature=temp, purpose="Modelling agent (ReAct)")
+    response = llm_with_tools.invoke(messages)
+    tool_calls = getattr(response, "tool_calls", None) or []
+    # Show any accompanying reasoning/thoughts first, then tool calls
+    if response.content:
+        thinking(
+            stage="modelling_agent (reasoning)" if tool_calls else "modelling_agent",
+            content=response.content,
+        )
+    elif not tool_calls:
+        thinking(stage="modelling_agent", content="(no content)")
+    if tool_calls:
+        tool_calls_display(tool_calls)
+    return {"messages": [response]}
 
 
-def decide_next(state: AgentState) -> Literal["planner", "report_generator"]:
-    """Route to planner or report_generator."""
-    parsed = state.get("parsed") or {}
-    num_models = (
-        parsed.get("num_models", 1)
-        if isinstance(parsed, dict)
-        else getattr(parsed, "num_models", 1)
-    )
-    completed = state.get("completed_runs") or []
-    if len(completed) < num_models:
-        return "planner"
+def tools_node(state: AgentState) -> dict[str, Any]:
+    """Execute tool calls from the last AIMessage and return ToolMessages + state updates."""
+    step_start("tools", "Executing tool(s)")
+    messages = list(state.get("messages") or [])
+    last = messages[-1] if messages else None
+    if not isinstance(last, AIMessage) or not getattr(last, "tool_calls", None):
+        return {}
+    tool_messages: list[ToolMessage] = []
+    current_state = dict(state)
+    for tc in last.tool_calls:
+        name = tc.get("name") or ""
+        args = tc.get("args") or {}
+        tid = tc.get("id", "")
+        content, updates = dispatch_tool(
+            state=current_state, tool_name=name, tool_args=args
+        )
+        args_summary = format_args_summary(args)
+        result_summary = content if isinstance(content, str) else str(content)
+        tool_result_display(
+            tool_name=name, args_summary=args_summary, result_summary=result_summary
+        )
+        tool_messages.append(ToolMessage(content=content, tool_call_id=tid))
+        if updates:
+            current_state.update(updates)
+        logs = _log(
+            state=current_state,
+            tool_or_step=name,
+            args_summary=args_summary,
+            result_summary=result_summary[:1000] + "..."
+            if len(result_summary) > 1000
+            else result_summary,
+        )
+        current_state["logs"] = logs
+        if name == "train_and_predict" and updates:
+            reflection = _reflection_from_train_result(content)
+            if reflection:
+                thought = list(current_state.get("thought_process") or [])
+                thought.append(
+                    ThoughtStep(stage="reflection", content=reflection).model_dump()
+                )
+                current_state["thought_process"] = thought
+    result: dict[str, Any] = {"messages": tool_messages}
+    if current_state.get("completed_runs") is not None:
+        result["completed_runs"] = current_state["completed_runs"]
+    if "last_predictions" in current_state:
+        result["last_predictions"] = current_state["last_predictions"]
+    if "iteration" in current_state:
+        result["iteration"] = current_state["iteration"]
+    if "logs" in current_state:
+        result["logs"] = current_state["logs"]
+    if "thought_process" in current_state:
+        result["thought_process"] = current_state["thought_process"]
+    return result
+
+
+def should_continue_modelling(
+    state: AgentState,
+) -> Literal["tools", "report_generator"]:
+    """Route to tools if last message has tool_calls, else report_generator. Cap at 30 messages."""
+    messages = state.get("messages") or []
+    if len(messages) >= 30:
+        return "report_generator"
+    if not messages:
+        return "report_generator"
+    last = messages[-1]
+    if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
+        return "tools"
     return "report_generator"
 
 
@@ -419,7 +378,10 @@ def report_generator_node(state: AgentState) -> dict[str, Any]:
     msg = llm.invoke([{"role": "user", "content": prompt}])
     report_md = msg.content if hasattr(msg, "content") else str(msg)
     if metrics_plot_path:
-        report_md = report_md.rstrip() + f"\n\n### Metrics comparison\n\n![Metrics comparison]({os.path.basename(metrics_plot_path)})\n"
+        report_md = (
+            report_md.rstrip()
+            + f"\n\n### Metrics comparison\n\n![Metrics comparison]({os.path.basename(metrics_plot_path)})\n"
+        )
     report_path = os.path.join(out_dir, "report.md")
     with open(report_path, "w") as f:
         f.write(report_md)
@@ -434,20 +396,18 @@ def build_graph():
     builder.add_node("parse_input", parse_input)
     builder.add_node("load_benchmark", load_benchmark_node)
     builder.add_node("analyze", analyze_node)
-    builder.add_node("planner", planner_node)
-    builder.add_node("executor", executor_node)
-    builder.add_node("evaluator", evaluator_node)
-    builder.add_node("reflect", reflect_node)
+    builder.add_node("seed_modelling_messages", seed_modelling_messages)
+    builder.add_node("modelling_agent", modelling_agent_node)
+    builder.add_node("tools", tools_node)
     builder.add_node("report_generator", report_generator_node)
 
     builder.add_edge(START, "parse_input")
     builder.add_edge("parse_input", "load_benchmark")
     builder.add_edge("load_benchmark", "analyze")
-    builder.add_edge("analyze", "planner")
-    builder.add_edge("planner", "executor")
-    builder.add_edge("executor", "evaluator")
-    builder.add_edge("evaluator", "reflect")
-    builder.add_conditional_edges("reflect", decide_next)
+    builder.add_edge("analyze", "seed_modelling_messages")
+    builder.add_edge("seed_modelling_messages", "modelling_agent")
+    builder.add_conditional_edges("modelling_agent", should_continue_modelling)
+    builder.add_edge("tools", "modelling_agent")
     builder.add_edge("report_generator", END)
 
     checkpointer = MemorySaver()

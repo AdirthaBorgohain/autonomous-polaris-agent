@@ -1,9 +1,9 @@
-"""Polaris benchmark loading, slug resolution, and inspection helpers."""
+"""Polaris benchmark loading, slug resolution, and metadata helpers."""
 
+import json
 import re
 from typing import Any
 
-import numpy as np
 import polaris as po
 
 # URL pattern: https://polarishub.io/benchmarks/owner/name or similar
@@ -14,11 +14,22 @@ POLARIS_BENCHMARK_URL_PATTERN = re.compile(
 DEFAULT_OWNER = "polaris"
 
 
+def _normalize_to_owner_name(slug: str) -> str:
+    """Ensure slug has exactly two segments (owner/name). Polaris Hub expects owner/name."""
+    parts = slug.strip().split("/")
+    if len(parts) <= 2:
+        return slug
+    return "/".join(parts[-2:])
+
+
 def resolve_slug(user_input: str) -> str:
     """Extract benchmark slug from a URL or return the input as slug.
 
+    - https://polarishub.io/benchmarks/tdcommons/caco2-wang -> tdcommons/caco2-wang
     - https://polarishub.io/benchmarks/polaris/adme-fang-solu-1 -> polaris/adme-fang-solu-1
+    - tdcommons/caco2-wang -> tdcommons/caco2-wang
     - polaris/adme-fang-solu-1 -> polaris/adme-fang-solu-1
+    - polaris/tdcommons/caco2-wang -> tdcommons/caco2-wang (normalized to owner/name)
     - adme-fang-solu-1 -> polaris/adme-fang-solu-1 (default owner)
 
     Raises:
@@ -34,7 +45,7 @@ def resolve_slug(user_input: str) -> str:
         return f"{owner}/{name}"
 
     if "/" in s:
-        return s
+        return _normalize_to_owner_name(s)
 
     return f"{DEFAULT_OWNER}/{s}"
 
@@ -44,63 +55,29 @@ def load_benchmark(slug: str, verify_checksum: str = "verify_unless_zarr") -> An
     return po.load_benchmark(slug, verify_checksum=verify_checksum)
 
 
-def inspect_benchmark(benchmark: Any) -> dict[str, Any]:
-    """Inspect a loaded benchmark: sizes, target info, task type, suggested metric.
+def get_benchmark_metadata(benchmark: Any) -> dict[str, Any]:
+    """Return benchmark metadata as a JSON-serializable dict for the agent.
 
-    Returns a dict with: train_size, test_size, target_cols, target_summary,
-    task_type, suggested_metric, input_cols (modalities).
+    Uses polaris model_dump_json(); dataset is excluded via Field(exclude=True).
+    Agent deduces task_type, metrics, strategy from this metadata.
     """
-    train, test = benchmark.get_train_test_split()
-    train_size = len(train.inputs) if hasattr(train.inputs, "__len__") else sum(1 for _ in train)
-    test_size = len(test.inputs) if hasattr(test.inputs, "__len__") else sum(1 for _ in test)
+    return json.loads(benchmark.model_dump_json())
 
-    target_cols = getattr(train, "target_cols", None) or []
-    input_cols = getattr(train, "input_cols", None) or []
-    targets = np.asarray(train.targets)
 
-    if targets.size == 0:
-        target_summary = {"dtype": str(targets.dtype), "note": "no targets"}
-        task_type = "unknown"
-    elif np.issubdtype(targets.dtype, np.floating) or np.issubdtype(targets.dtype, np.integer):
-        if np.issubdtype(targets.dtype, np.floating) and targets.ndim == 1:
-            target_summary = {
-                "dtype": str(targets.dtype),
-                "mean": float(np.nanmean(targets)),
-                "std": float(np.nanstd(targets)) if targets.size > 1 else 0.0,
-                "min": float(np.nanmin(targets)),
-                "max": float(np.nanmax(targets)),
-            }
-        else:
-            target_summary = {"dtype": str(targets.dtype), "shape": targets.shape}
-        task_type = "regression"
+def evaluate_predictions(
+    benchmark: Any,
+    predictions: list[float],
+    prediction_format: str = "labels",
+) -> dict[str, float]:
+    """Run benchmark.evaluate and return a dict of metric name -> score.
+
+    For roc_auc benchmarks pass prediction_format='probabilities' (uses y_prob).
+    For balanced_accuracy/accuracy pass prediction_format='labels' (uses y_pred).
+    """
+    if prediction_format == "probabilities":
+        results = benchmark.evaluate(y_prob=predictions)
     else:
-        unique = np.unique(targets)
-        target_summary = {
-            "dtype": str(targets.dtype),
-            "n_unique": int(len(unique)),
-            "classes_sample": unique.tolist()[:10],
-        }
-        task_type = "classification"
-
-    if task_type == "regression":
-        suggested_metric = "mean_absolute_error"
-    else:
-        suggested_metric = "balanced_accuracy"
-
-    return {
-        "train_size": train_size,
-        "test_size": test_size,
-        "target_cols": target_cols,
-        "input_cols": input_cols,
-        "target_summary": target_summary,
-        "task_type": task_type,
-        "suggested_metric": suggested_metric,
-    }
-
-
-def evaluate_predictions(benchmark: Any, predictions: list[float]) -> dict[str, float]:
-    """Run benchmark.evaluate(predictions) and return a dict of metric name -> score."""
-    results = benchmark.evaluate(predictions)
+        results = benchmark.evaluate(y_pred=predictions)
     out = {}
     if hasattr(results, "results") and results.results is not None:
         df = results.results

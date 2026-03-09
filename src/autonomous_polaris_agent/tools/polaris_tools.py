@@ -1,31 +1,34 @@
-"""Polaris benchmark tools: load, inspect, evaluate."""
+"""Polaris benchmark tools: load, evaluate."""
 
 from typing import Any
 
 from autonomous_polaris_agent.polaris_helpers import (
     evaluate_predictions as _evaluate_predictions,
-    inspect_benchmark as _inspect_benchmark,
+    get_benchmark_metadata as _get_benchmark_metadata,
     load_benchmark as _load_benchmark,
     resolve_slug,
 )
 
 
 def load_benchmark(slug: str) -> tuple[Any, dict[str, Any]]:
-    """Load a Polaris benchmark by slug and return (benchmark, inspection).
+    """Load a Polaris benchmark by slug and return (benchmark, metadata).
 
-    Resolves URL or short slug to owner/name. Idempotent for same slug.
+    Resolves URL or short slug to owner/name. Metadata is from benchmark.model_dump_json().
     """
     resolved = resolve_slug(slug)
     benchmark = _load_benchmark(resolved)
-    inspection = _inspect_benchmark(benchmark)
-    return benchmark, inspection
+    metadata = _get_benchmark_metadata(benchmark)
+    return benchmark, metadata
 
 
-def inspect_benchmark(benchmark: Any) -> dict[str, Any]:
-    """Return train/test sizes, target summary, modalities, task type, suggested metric."""
-    return _inspect_benchmark(benchmark)
-
-
-def evaluate_predictions(benchmark: Any, predictions: list[float]) -> dict[str, float]:
-    """Run benchmark.evaluate(predictions) and return metric name -> score."""
-    return _evaluate_predictions(benchmark, predictions)
+def evaluate_predictions(
+    benchmark: Any,
+    predictions: list[float],
+    prediction_format: str = "labels",
+) -> dict[str, float]:
+    """Run benchmark.evaluate and return metric name -> score."""
+    return _evaluate_predictions(
+        benchmark=benchmark,
+        predictions=predictions,
+        prediction_format=prediction_format,
+    )
