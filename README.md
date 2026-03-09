@@ -2,6 +2,8 @@
 
 An autonomous agent that takes a natural language request (e.g. a Polaris benchmark URL and number of models), plans and runs multiple ML pipelines end-to-end, evaluates them, and produces a short report and artifacts. Built with LangGraph and OpenAI.
 
+For a concise technical overview of the dataset, approach, key decisions, and results, see [REPORT.md](REPORT.md).
+
 The agent runs without manual intervention beyond initial configuration. It parses user intent, loads Polaris chemistry benchmarks, plans domain-appropriate pipelines (fingerprints, models, metrics), executes them sequentially while using prior results to inform the next choice, and writes a structured report with artifact links. Single-command reproducibility is supported via `uv`.
 
 ## Environment setup
@@ -45,11 +47,22 @@ Each run gets a **timestamped directory** under `outputs/` (e.g. `outputs/run_20
 - [polaris/adme-fang-solu-1](https://polarishub.io/benchmarks/polaris/adme-fang-solu-1)
 - [tdcommons/caco2-wang](https://polarishub.io/benchmarks/tdcommons/caco2-wang)
 
+## Sample outputs
+
+Sample outputs for three datasets are available in the `sample_outputs/` directory:
+
+- **polaris/adme-fang-solu-1**
+- **tdcommons/pgp-broccatelli**
+- **tdcommons/caco2-wang**
+
+Each subdirectory contains `report.md`, `run.jsonl`, and `artifacts/` (including `metrics_comparison.png`).
+
 ## Work directory structure
 
 ```
 autonomous-polaris-agent/
 ├── main.py                    # CLI entry (delegates to cli)
+├── REPORT.md                  # Technical overview (dataset, approach, decisions, results)
 ├── pyproject.toml             # uv/pip deps
 ├── .env.example               # OPENAI_API_KEY, OPENAI_MODEL
 ├── assets/
@@ -120,7 +133,7 @@ autonomous-polaris-agent/
 | State across iterations | `completed_runs`, `thought_process`, `messages` in `AgentState`. |
 | LangGraph | Used for workflow orchestration. |
 | Minimal deps | RDKit, scikit-learn, matplotlib, polaris-lib; XGBoost/LightGBM optional (libomp on macOS). |
-| Short report (≤3 pages) | `REPORT_FINAL` prompt enforces max 3 pages. |
+| Short report | `REPORT_FINAL` prompt enforces max 3 pages. |
 | Artifact links | Report includes paths to models and plots. |
 | Domain-appropriate modeling | Task analysis + modelling agent prompts guide fingerprint/model/metric choices. |
 | Reproducible single command | `uv run python main.py "..."`. |
@@ -131,6 +144,6 @@ autonomous-polaris-agent/
 
 Each run produces a timestamped directory under `outputs/`:
 
-- **report.md** – Final report (≤3 pages) with: dataset and task, approach, reasoning and decisions, results table, artifact links. When the user asks for "validation set" performance, that is the held-out evaluation set from the benchmark.
+- **report.md** – Final report  with: dataset and task, approach, reasoning and decisions, results table, artifact links. When the user asks for "validation set" performance, that is the held-out evaluation set from the benchmark.
 - **run.jsonl** – One JSON object per line: `tool_or_step`, `args_summary`, `result_summary`, `timestamp`.
 - **artifacts/** – Saved models (`model_0.joblib`, …), train/test histograms, CV results (when `use_cv`), and `metrics_comparison.png` (bar chart of primary metric per run).

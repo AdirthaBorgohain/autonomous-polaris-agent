@@ -304,7 +304,18 @@ def modelling_agent_node(state: AgentState) -> dict[str, Any]:
         thinking(stage="modelling_agent", content="(no content)")
     if tool_calls:
         tool_calls_display(tool_calls)
-    return {"messages": [response]}
+    logs = None
+    if tool_calls and response.content:
+        next_tool_name = tool_calls[0].get("name") if tool_calls else ""
+        logs = _log(
+            state=state,
+            tool_or_step="plan",
+            args_summary=f"next_tool={next_tool_name}" if next_tool_name else "next_tool_call",
+            result_summary=response.content[:1000] + "..."
+            if len(response.content) > 1000
+            else response.content,
+        )
+    return {"messages": [response], "logs": logs} if logs else {"messages": [response]}
 
 
 def tools_node(state: AgentState) -> dict[str, Any]:

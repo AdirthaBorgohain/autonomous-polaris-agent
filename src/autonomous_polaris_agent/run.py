@@ -48,7 +48,7 @@ def run_agent(user_message: str = "", verbose: bool = True) -> dict:
         log_path = os.path.join(run_dir, "run.jsonl")
         with open(log_path, "w") as f:
             for entry in logs:
-                f.write(json.dumps(entry) + "\n")
+                f.write(json.dumps(entry, default=str) + "\n")
 
     out_dir = result.get("output_dir") or run_dir
     report_path = os.path.join(out_dir, "report.md") if result.get("report_md") else None
