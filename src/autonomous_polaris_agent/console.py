@@ -65,27 +65,6 @@ def thinking(stage: str, content: str) -> None:
     )
 
 
-def plan_display(
-    fingerprint: str,
-    model_type: str,
-    hyperparameters: dict[str, Any],
-    rationale: str,
-) -> None:
-    """Emit current pipeline plan."""
-    if not _enabled:
-        return
-    lines = [
-        f"fingerprint: {fingerprint}",
-        f"model_type: {model_type}",
-        f"hyperparameters: {hyperparameters}",
-    ]
-    if rationale:
-        lines.append(f"\nrationale: {rationale}")
-    _console.print(
-        Panel("\n".join(lines), title="[blue]Plan[/blue]", border_style="blue")
-    )
-
-
 def training_with_hyperparameter_tuning_display() -> None:
     """Emit notice that training is running with CV-based hyperparameter tuning."""
     if not _enabled:
@@ -93,14 +72,6 @@ def training_with_hyperparameter_tuning_display() -> None:
     _console.print(
         "[cyan]Training model with hyperparameter tuning (randomized search + CV)[/cyan]"
     )
-
-
-def metrics_display(metrics: dict[str, float]) -> None:
-    """Emit evaluation metrics."""
-    if not _enabled:
-        return
-    rows = "\n".join(f"  {k}: {v}" for k, v in metrics.items())
-    _console.print(Panel(rows, title="[green]Metrics[/green]", border_style="green"))
 
 
 def error_display(message: str) -> None:

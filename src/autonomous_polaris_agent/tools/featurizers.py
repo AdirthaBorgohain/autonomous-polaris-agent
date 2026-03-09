@@ -14,17 +14,23 @@ def _smiles_to_mol(smiles: str):
     return Chem.MolFromSmiles(str(smiles).strip())
 
 
+def _prep_fingerprint_out(
+    smiles_list: Union[List[str], np.ndarray], n_bits: int
+) -> tuple[np.ndarray, np.ndarray]:
+    arr = np.asarray(smiles_list).ravel()
+    out = np.zeros((len(arr), n_bits), dtype=np.float32)
+    return arr, out
+
+
 def morgan_fingerprints(
     smiles_list: Union[List[str], np.ndarray],
     radius: int = 2,
     n_bits: int = 2048,
 ) -> np.ndarray:
     """Compute Morgan (ECFP) bit vector for each SMILES. Invalid mols -> zero vector."""
-    arr = np.asarray(smiles_list).ravel()
-    n = len(arr)
-    out = np.zeros((n, n_bits), dtype=np.float32)
+    arr, out = _prep_fingerprint_out(smiles_list=smiles_list, n_bits=n_bits)
     mfpgen = rdFingerprintGenerator.GetMorganGenerator(radius=radius, fpSize=n_bits)
-    for i in range(n):
+    for i in range(len(arr)):
         mol = _smiles_to_mol(arr[i])
         if mol is None:
             continue
@@ -39,11 +45,9 @@ def morgan_count_fingerprints(
     n_bits: int = 2048,
 ) -> np.ndarray:
     """Compute Morgan count vector for each SMILES. Invalid mols -> zero vector."""
-    arr = np.asarray(smiles_list).ravel()
-    n = len(arr)
-    out = np.zeros((n, n_bits), dtype=np.float32)
+    arr, out = _prep_fingerprint_out(smiles_list=smiles_list, n_bits=n_bits)
     mfpgen = rdFingerprintGenerator.GetMorganGenerator(radius=radius, fpSize=n_bits)
-    for i in range(n):
+    for i in range(len(arr)):
         mol = _smiles_to_mol(arr[i])
         if mol is None:
             continue
@@ -91,11 +95,9 @@ def rdkit_descriptors(smiles_list: Union[List[str], np.ndarray]) -> np.ndarray:
 
 def maccs_fingerprints(smiles_list: Union[List[str], np.ndarray]) -> np.ndarray:
     """Compute MACCS 167-bit keys per SMILES. Invalid mols -> zero vector."""
-    arr = np.asarray(smiles_list).ravel()
-    n = len(arr)
     n_bits = 167
-    out = np.zeros((n, n_bits), dtype=np.float32)
-    for i in range(n):
+    arr, out = _prep_fingerprint_out(smiles_list=smiles_list, n_bits=n_bits)
+    for i in range(len(arr)):
         mol = _smiles_to_mol(arr[i])
         if mol is None:
             continue
@@ -109,11 +111,9 @@ def atom_pair_fingerprints(
     n_bits: int = 2048,
 ) -> np.ndarray:
     """Compute atom pair fingerprint per SMILES. Invalid mols -> zero vector."""
-    arr = np.asarray(smiles_list).ravel()
-    n = len(arr)
-    out = np.zeros((n, n_bits), dtype=np.float32)
+    arr, out = _prep_fingerprint_out(smiles_list=smiles_list, n_bits=n_bits)
     gen = rdFingerprintGenerator.GetAtomPairGenerator(fpSize=n_bits)
-    for i in range(n):
+    for i in range(len(arr)):
         mol = _smiles_to_mol(arr[i])
         if mol is None:
             continue

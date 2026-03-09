@@ -66,15 +66,17 @@ Report in Markdown.
 """
 
 
+PROMPTS: dict[str, str] = {
+    "analysis_task": ANALYSIS_TASK,
+    "modelling_agent_system": MODELLING_AGENT_SYSTEM,
+    "parse_user_input": PARSE_USER_INPUT,
+    "report_final": REPORT_FINAL,
+}
+
+
 def get_prompt(name: str, **kwargs) -> str:
     """Return the prompt named `name`, with format kwargs applied."""
-    prompts = {
-        "analysis_task": ANALYSIS_TASK,
-        "modelling_agent_system": MODELLING_AGENT_SYSTEM,
-        "parse_user_input": PARSE_USER_INPUT,
-        "report_final": REPORT_FINAL,
-    }
-    template = prompts.get(name)
+    template = PROMPTS.get(name)
     if template is None:
         raise KeyError(f"Unknown prompt: {name}")
     return template.format(**kwargs) if kwargs else template

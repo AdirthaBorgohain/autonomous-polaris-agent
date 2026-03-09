@@ -13,10 +13,10 @@ from autonomous_polaris_agent.tools.ml_tools import (
     create_ensemble_predictions as _create_ensemble,
 )
 from autonomous_polaris_agent.tools.ml_tools import (
-    evaluate_predictions as _evaluate_predictions,
-)
-from autonomous_polaris_agent.tools.ml_tools import (
     train_and_predict as _train_and_predict,
+)
+from autonomous_polaris_agent.tools.polaris_tools import (
+    evaluate_predictions as _evaluate_predictions,
 )
 
 

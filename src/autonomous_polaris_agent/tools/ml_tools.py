@@ -53,9 +53,6 @@ except Exception:
     xgb = None
     XGB_AVAILABLE = False
 
-# Featurizer-only keys (used in build_features, not passed to sklearn)
-FEATURIZER_HP_KEYS = frozenset({"radius", "morgan_radius", "n_bits", "morgan_n_bits"})
-
 REGRESSORS: dict[str, Any] = {
     "ridge": Ridge,
     "lasso": Lasso,
@@ -611,23 +608,6 @@ def train_and_predict(
         rationale=plan.rationale,
         best_hyperparameters=best_hyperparameters,
         cv_score=cv_score,
-    )
-
-
-def evaluate_predictions(
-    benchmark: Any,
-    predictions: list[float],
-    prediction_format: str = "labels",
-) -> dict[str, float]:
-    """Run benchmark.evaluate and return metric name -> score."""
-    from autonomous_polaris_agent.tools.polaris_tools import (
-        evaluate_predictions as _eval,
-    )
-
-    return _eval(
-        benchmark=benchmark,
-        predictions=predictions,
-        prediction_format=prediction_format,
     )
 
 
