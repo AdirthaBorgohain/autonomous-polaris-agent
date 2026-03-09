@@ -1,9 +1,9 @@
-"""CLI entrypoint; delegates to the agent graph."""
+"""CLI entrypoint; delegates to the Deep Agent."""
 
 import argparse
 import sys
 
-from autonomous_polaris_agent.run import run_agent
+from autonomous_polaris_agent.runner import run_deep_agent
 
 
 def main() -> None:
@@ -17,6 +17,11 @@ def main() -> None:
         default="",
         help="Natural language request (e.g. dataset URL + number of models).",
     )
+    parser.add_argument(
+        "--no-sandbox",
+        action="store_true",
+        help="Run code on host (no OpenSandbox). Default is --sandbox.",
+    )
     args = parser.parse_args()
     user_message = (args.message or "").strip()
     if not user_message:
@@ -28,4 +33,4 @@ def main() -> None:
             file=sys.stderr,
         )
         sys.exit(1)
-    run_agent(user_message=user_message)
+    run_deep_agent(user_message=user_message, use_sandbox=not args.no_sandbox)
