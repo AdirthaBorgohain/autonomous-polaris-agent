@@ -117,6 +117,7 @@ class AgentState(TypedDict, total=False):
     parsed: Optional[ParsedRequest]
     benchmark: Any
     benchmark_inspection: Optional[dict[str, Any]]
+    primary_metric: Optional[str]
     task_analysis: Optional[str]
     thought_process: list[ThoughtStep]
     iteration: int
@@ -135,6 +136,7 @@ def create_initial_state(user_input: str) -> dict[str, Any]:
         "parsed": None,
         "benchmark": None,
         "benchmark_inspection": None,
+        "primary_metric": None,
         "task_analysis": None,
         "thought_process": [],
         "iteration": 0,

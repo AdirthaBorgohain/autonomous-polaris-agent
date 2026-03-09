@@ -11,6 +11,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
+from pydantic import BaseModel, Field
 
 from autonomous_polaris_agent.console import (
     error_display,
@@ -41,6 +42,13 @@ from autonomous_polaris_agent.tools.agent_tools import (
 )
 
 load_dotenv()
+
+
+class AnalysisResult(BaseModel):
+    task_analysis: str = Field(description="1-2 paragraph analysis")
+    primary_metric: str = Field(
+        description="Metric name to optimize; should match benchmark.evaluate() metric name if possible"
+    )
 
 
 def _get_llm() -> ChatOpenAI:
@@ -93,8 +101,10 @@ def _reflection_from_train_result(content: str) -> str | None:
         metrics = data.get("metrics") or {}
         if not metrics:
             return f"{model_id}: {description}"
-        metric_name = next(iter(metrics.keys()), "")
-        value = metrics.get(metric_name, "")
+        metric_name = data.get("metric_name") or next(iter(metrics.keys()), "")
+        value = data.get("metric_value")
+        if value is None:
+            value = metrics.get(metric_name, "")
         return f"{model_id}: {description} — {metric_name}={value}"
     except (json.JSONDecodeError, TypeError):
         return None
@@ -209,36 +219,61 @@ def analyze_node(state: AgentState) -> dict[str, Any]:
     prompt = get_prompt(
         "analysis_task", benchmark_metadata=json.dumps(metadata, indent=2)
     )
-    msg = llm.invoke([{"role": "user", "content": prompt}])
-    content = msg.content if hasattr(msg, "content") else str(msg)
-    thinking(stage="analysis", content=content)
-    step = ThoughtStep(stage="analysis", content=content)
+    llm_structured = llm.with_structured_output(AnalysisResult)
+    result = llm_structured.invoke([{"role": "user", "content": prompt}])
+    task_analysis = (result.task_analysis or "").strip()
+    primary_metric = (result.primary_metric or "").strip() or None
+
+    analysis_display = task_analysis
+    if primary_metric:
+        analysis_display = (
+            f"{task_analysis}\n\nPrimary metric to optimize: {primary_metric}"
+        )
+    thinking(stage="analysis", content=analysis_display)
+    step = ThoughtStep(stage="analysis", content=analysis_display)
     thought = list(state.get("thought_process") or [])
     thought.append(step.model_dump())
     logs = _log(
         state,
         tool_or_step="analyze",
         args_summary="benchmark_metadata",
-        result_summary=content[:500] + "..." if len(content) > 500 else content,
+        result_summary=analysis_display[:500] + "..."
+        if len(analysis_display) > 500
+        else analysis_display,
     )
-    return {"task_analysis": content, "thought_process": thought, "logs": logs}
+    return {
+        "task_analysis": task_analysis,
+        "primary_metric": primary_metric,
+        "thought_process": thought,
+        "logs": logs,
+    }
 
 
 def seed_modelling_messages(state: AgentState) -> dict[str, Any]:
     """Build initial messages for the ReAct modelling agent from task_analysis and state."""
     task_analysis = state.get("task_analysis") or ""
     metadata = state.get("benchmark_inspection") or {}
+    primary_metric = state.get("primary_metric") or ""
     parsed = state.get("parsed") or {}
     num_models = (
         parsed.get("num_models", 1)
         if isinstance(parsed, dict)
         else getattr(parsed, "num_models", 1)
     )
+    primary_metric_line = (
+        f"Primary metric to optimize: {primary_metric}\n\n" if primary_metric else ""
+    )
     content = (
-        f"Task analysis:\n{task_analysis}\n\n"
-        f"Benchmark metadata:\n{json.dumps(metadata, indent=2)}\n\n"
-        f"Determine task_type (regression or classification) from the benchmark metadata (e.g. target_types) and pass it to train_and_predict and create_ensemble_predictions. If main_metric is roc_auc (or roc_auc_score), pass prediction_format='probabilities' to train_and_predict and create_ensemble_predictions. Otherwise use prediction_format='labels'.\n\n"
-        f"The user asked for exactly {num_models} pipeline(s). You must run exactly N pipelines (call train_and_predict N times) before calling finish_and_report. Each of the N pipelines must be meaningfully different (e.g. different fingerprint and/or model type); repeating the same pipeline does not count toward N. Do not call finish_and_report until you have N completed runs. Run pipelines one at a time: after each train_and_predict result, use the returned metrics and description to decide the next pipeline. You can iterate on hyperparameters (use_cv and tune_param_grid, or different hyperparameters) using each run's test metrics before moving to a new pipeline. Use each pipeline's results to inform the next (e.g. try a different model or fingerprint if the last one underperformed, or add scale_features/PCA/feature selection if that might help). Prefer pipelines that could improve the primary metric (e.g. try feature selection or scaling when relevant), not only safe baselines. When done, call finish_and_report."
+        primary_metric_line
+        + f"Task analysis:\n{task_analysis}\n\n"
+        + f"Benchmark metadata:\n{json.dumps(metadata, indent=2)}\n\n"
+        + "Determine task_type (regression or classification) from the benchmark metadata (e.g. target_types) and pass it to train_and_predict and create_ensemble_predictions. If main_metric is roc_auc (or roc_auc_score), pass prediction_format='probabilities' to train_and_predict and create_ensemble_predictions. Otherwise use prediction_format='labels'.\n\n"
+        + (
+            f"Optimize the primary metric '{primary_metric}' when choosing pipelines and hyperparameters.\n\n"
+            if primary_metric
+            else ""
+        )
+        + f"The user asked for exactly {num_models} pipeline(s). You must run exactly N pipelines (call train_and_predict N times) before calling finish_and_report. Each of the N pipelines must be meaningfully different (e.g. different fingerprint and/or model type); repeating the same pipeline does not count toward N. Do not call finish_and_report until you have N completed runs. Run pipelines one at a time: after each train_and_predict result, use the returned metrics and description to decide the next pipeline. You can iterate on hyperparameters (use_cv and tune_param_grid, or different hyperparameters) using each run's test metrics before moving to a new pipeline. Use each pipeline's results to inform the next (e.g. try a different model or fingerprint if the last one underperformed, or add scale_features/PCA/feature selection if that might help). Prefer pipelines that could improve the primary metric (e.g. try feature selection or scaling when relevant), not only safe baselines. When done, call finish_and_report."
     )
     return {
         "messages": [
@@ -351,6 +386,7 @@ def report_generator_node(state: AgentState) -> dict[str, Any]:
     thought_process = state.get("thought_process") or []
     completed = state.get("completed_runs") or []
     out_dir = state.get("output_dir") or "outputs"
+    primary_metric = state.get("primary_metric") or None
     os.makedirs(out_dir, exist_ok=True)
 
     # Metrics comparison plot (bar chart of primary metric per run)
@@ -358,6 +394,7 @@ def report_generator_node(state: AgentState) -> dict[str, Any]:
         completed_runs=completed,
         output_dir=out_dir,
         filename="metrics_comparison.png",
+        primary_metric=primary_metric,
     )
 
     thought_str = "\n\n".join(

@@ -796,13 +796,15 @@ def save_metrics_comparison_plot(
     completed_runs: list[dict[str, Any]],
     output_dir: str,
     filename: str = "metrics_comparison.png",
+    primary_metric: Optional[str] = None,
 ) -> Optional[str]:
     """Bar chart of primary metric per run. Returns path or None if no metrics."""
     if not completed_runs:
         return None
     model_ids = []
     values = []
-    metric_name = None
+    chosen_metric = (primary_metric or "").strip() or None
+    metric_name = chosen_metric
     for run in completed_runs:
         metrics = run.get("metrics") or {}
         if not metrics:
@@ -810,7 +812,11 @@ def save_metrics_comparison_plot(
         if metric_name is None:
             metric_name = next(iter(metrics.keys()))
         model_ids.append(run.get("model_id", "?"))
-        values.append(metrics.get(metric_name, float("nan")))
+        if metric_name in metrics:
+            values.append(metrics.get(metric_name, float("nan")))
+        else:
+            fallback_metric = next(iter(metrics.keys()), "")
+            values.append(metrics.get(fallback_metric, float("nan")))
     if not model_ids or metric_name is None:
         return None
     fig, ax = plt.subplots()

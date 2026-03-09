@@ -290,14 +290,22 @@ def execute_train_and_predict(
             predictions=preds,
             prediction_format=prediction_format,
         )
+        primary_metric = (state.get("primary_metric") or "").strip()
+        chosen_metric = (
+            primary_metric
+            if primary_metric and primary_metric in metrics
+            else next(iter(metrics.keys()), "")
+        )
         result_dict = result.model_dump()
         result_dict["metrics"] = metrics
-        result_dict["metric_name"] = next(iter(metrics.keys()), "")
-        result_dict["metric_value"] = metrics.get(result_dict["metric_name"], 0.0)
+        result_dict["metric_name"] = chosen_metric
+        result_dict["metric_value"] = metrics.get(chosen_metric, 0.0)
         msg_payload = {
             "model_id": result.model_id,
             "description": result.description,
             "metrics": metrics,
+            "metric_name": chosen_metric,
+            "metric_value": metrics.get(chosen_metric, 0.0),
             "predictions_saved": True,
             "next_step": "Use these metrics to decide your next pipeline (e.g. try a different model or representation if this one underperformed), or create_ensemble_predictions, or finish_and_report.",
         }
@@ -363,15 +371,23 @@ def execute_create_ensemble_predictions(
             predictions=preds,
             prediction_format=prediction_format,
         )
+        primary_metric = (state.get("primary_metric") or "").strip()
+        chosen_metric = (
+            primary_metric
+            if primary_metric and primary_metric in metrics
+            else next(iter(metrics.keys()), "")
+        )
         result_dict = result.model_dump()
         result_dict["metrics"] = metrics
-        result_dict["metric_name"] = next(iter(metrics.keys()), "")
-        result_dict["metric_value"] = metrics.get(result_dict["metric_name"], 0.0)
+        result_dict["metric_name"] = chosen_metric
+        result_dict["metric_value"] = metrics.get(chosen_metric, 0.0)
         msg = json.dumps(
             {
                 "model_id": result.model_id,
                 "description": result.description,
                 "metrics": metrics,
+                "metric_name": chosen_metric,
+                "metric_value": metrics.get(chosen_metric, 0.0),
             }
         )
         state_updates = {

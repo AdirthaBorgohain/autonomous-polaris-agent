@@ -19,7 +19,9 @@ Output format (JSON only):
 {"dataset_slug": "...", "num_models": N, "task_type": "regression"|"classification"|null, "explicit_metric": null|"...", "save_models": true|false}
 """
 
-ANALYSIS_TASK = """You are an expert in chemistry ML and ADME modeling. Given the following benchmark metadata, write a short task analysis (1-2 paragraphs) that covers:
+ANALYSIS_TASK = """You are an expert in chemistry ML and ADME modeling.
+
+Given the following benchmark metadata, write a short task analysis (1-2 paragraphs) that covers:
 
 1. What the task is: what the target represents (e.g. solubility, permeability) and the task type (regression/classification—determine from target_types in the metadata).
 2. Data characteristics: size (n_train_datapoints, n_test_datapoints), what might make this easy or hard, any red flags (e.g. small n, skewed target).
