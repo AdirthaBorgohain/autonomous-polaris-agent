@@ -3,6 +3,9 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+assignment.txt
+tests/
+
 # C extensions
 *.so
 
@@ -193,6 +196,12 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Agent outputs (plan)
+outputs/
+output/
+artifacts/
+logs/
 
 # Cursor
 #  Cursor is an AI-powered code editor. `.cursorignore` specifies files/directories to
